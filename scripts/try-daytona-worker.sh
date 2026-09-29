@@ -6,6 +6,8 @@ control_dir="${PLANA_BOX_CONTROL_DIR:-$fork_dir/../plana-box-control-server}"
 state_dir="${T3_DAYTONA_DEMO_DIR:-$HOME/.local/state/t3-daytona-demo}"
 broker_dir="$state_dir/broker"
 task_file="$state_dir/current-task"
+desktop_server_port=33773
+desktop_web_port=25733
 proxy_command="$(command -v plana-box || true)"
 identity_agent="${T3_DAYTONA_IDENTITY_AGENT:-$HOME/Library/Group Containers/2BUA8C4S2C.com.1password/t/agent.sock}"
 
@@ -142,7 +144,7 @@ if ! curl -fsS http://127.0.0.1:39773/.well-known/t3/environment >/dev/null 2>&1
 fi
 REMOTE
 
-  for port in 39774 4173 13773 5733; do
+  for port in 39774 4173 "$desktop_server_port" "$desktop_web_port"; do
     if lsof -nP -iTCP:"$port" -sTCP:LISTEN >/dev/null 2>&1; then
       echo "Local port $port is in use. Stop that listener, then run start again." >&2
       exit 1
@@ -170,7 +172,7 @@ REMOTE
   }
 
   pair
-  printf '\nIn T3 Code (Dev): Add a computer, paste the pairing link, select only the\n'
+  printf '\nIn T3 Code (Daytona Demo): Add a computer, paste the pairing link, select only the\n'
   printf 'worker project named repo, then open Files, Diff, Terminal, or Browser.\n'
   printf 'Run npm start in the T3 terminal and select localhost:4173 in Browser.\n'
   printf 'If the dev window starts blank, wait for the build, then choose View > Force Reload.\n'
@@ -178,6 +180,8 @@ REMOTE
   cd "$fork_dir"
   T3CODE_HOME="$run/t3-home" \
   T3CODE_DESKTOP_APP_DATA_DIRECTORY="$run/desktop-app-data" \
+  T3CODE_DESKTOP_DISPLAY_NAME="T3 Code (Daytona Demo)" \
+  T3CODE_PORT_OFFSET=20000 \
   T3CODE_DISABLE_AUTO_UPDATE=1 \
     ./node_modules/.bin/vp run dev:desktop --home-dir "$run/t3-home" &
   desktop_wrapper_pid=$!

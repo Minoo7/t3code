@@ -128,11 +128,13 @@ describe("DesktopEnvironment", () => {
           VITE_DEV_SERVER_URL: "http://localhost:5173",
           T3CODE_HOME: "/tmp/isolated-t3-home",
           T3CODE_DESKTOP_APP_DATA_DIRECTORY: "/tmp/isolated-t3-profile",
+          T3CODE_DESKTOP_DISPLAY_NAME: "T3 Code (Daytona Demo)",
         },
       );
 
       assert.equal(environment.appDataDirectory, "/tmp/isolated-t3-profile");
       assert.equal(environment.stateDir, "/tmp/isolated-t3-home/userdata");
+      assert.equal(environment.displayName, "T3 Code (Daytona Demo)");
     }),
   );
 
