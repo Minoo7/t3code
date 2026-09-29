@@ -120,6 +120,22 @@ describe("DesktopEnvironment", () => {
     }),
   );
 
+  it.effect("isolates desktop profile separately from T3 server state", () =>
+    Effect.gen(function* () {
+      const environment = yield* makeEnvironment(
+        {},
+        {
+          VITE_DEV_SERVER_URL: "http://localhost:5173",
+          T3CODE_HOME: "/tmp/isolated-t3-home",
+          T3CODE_DESKTOP_APP_DATA_DIRECTORY: "/tmp/isolated-t3-profile",
+        },
+      );
+
+      assert.equal(environment.appDataDirectory, "/tmp/isolated-t3-profile");
+      assert.equal(environment.stateDir, "/tmp/isolated-t3-home/userdata");
+    }),
+  );
+
   it.effect("uses the packaged Windows server sidecar as the backend root", () =>
     Effect.gen(function* () {
       const environment = yield* makeEnvironment({
