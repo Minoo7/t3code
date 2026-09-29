@@ -68,7 +68,7 @@ REMOTE
 }
 
 start() {
-  local id run response status worker tunnel_pid
+  local id run response status worker tunnel_pid desktop_pid desktop_wrapper_pid command_line app_pid app_command
   for command in bun jq ssh curl; do
     command -v "$command" >/dev/null || { echo "Missing $command" >&2; exit 1; }
   done
@@ -142,7 +142,7 @@ if ! curl -fsS http://127.0.0.1:39773/.well-known/t3/environment >/dev/null 2>&1
 fi
 REMOTE
 
-  for port in 39774 4173; do
+  for port in 39774 4173 13773 5733; do
     if lsof -nP -iTCP:"$port" -sTCP:LISTEN >/dev/null 2>&1; then
       echo "Local port $port is in use. Stop that listener, then run start again." >&2
       exit 1
@@ -179,13 +179,60 @@ REMOTE
   T3CODE_HOME="$run/t3-home" \
   T3CODE_DESKTOP_APP_DATA_DIRECTORY="$run/desktop-app-data" \
   T3CODE_DISABLE_AUTO_UPDATE=1 \
-    ./node_modules/.bin/vp run dev:desktop --home-dir "$run/t3-home"
+    ./node_modules/.bin/vp run dev:desktop --home-dir "$run/t3-home" &
+  desktop_wrapper_pid=$!
+  desktop_pid=""
+  for _ in {1..20}; do
+    desktop_pid="$(pgrep -P "$desktop_wrapper_pid" | head -1 || true)"
+    command_line="$(ps -p "$desktop_pid" -o command= 2>/dev/null || true)"
+    if [[ "$command_line" == *"scripts/dev-runner.ts dev:desktop"* ]]; then
+      break
+    fi
+    sleep 0.25
+  done
+  [[ "$command_line" == *"scripts/dev-runner.ts dev:desktop"* ]] || {
+    echo "Could not identify the isolated desktop runner process." >&2
+    exit 1
+  }
+  printf '%s\n' "$desktop_pid" > "$run/desktop.pid"
+  for _ in {1..180}; do
+    app_pid=""
+    while read -r pid app_command; do
+      if [[ "$app_command" == "$fork_dir/apps/desktop/.electron-runtime/T3 Code (Dev).app/Contents/MacOS/Electron --t3code-dev-root=$fork_dir/apps/desktop "* ]]; then
+        app_pid="$pid"
+        break
+      fi
+    done < <(ps -axo pid=,command=)
+    if [[ -n "$app_pid" ]]; then
+      printf '%s\n' "$app_pid" > "$run/desktop-app.pid"
+      break
+    fi
+    kill -0 "$desktop_wrapper_pid" 2>/dev/null || break
+    sleep 1
+  done
+  wait "$desktop_wrapper_pid"
 }
 
 stop() {
   local id run pid command_line response status retention
   id="$(task_id)"
   run="$(run_dir)"
+  if [[ -s "$run/desktop.pid" ]]; then
+    pid="$(cat "$run/desktop.pid")"
+    command_line="$(ps -p "$pid" -o command= 2>/dev/null || true)"
+    if [[ "$command_line" == *"scripts/dev-runner.ts dev:desktop"* && "$command_line" == *"$run/t3-home"* ]]; then
+      kill -TERM "$pid"
+    fi
+    rm -f "$run/desktop.pid"
+  fi
+  if [[ -s "$run/desktop-app.pid" ]]; then
+    pid="$(cat "$run/desktop-app.pid")"
+    command_line="$(ps -p "$pid" -o command= 2>/dev/null || true)"
+    if [[ "$command_line" == "$fork_dir/apps/desktop/.electron-runtime/T3 Code (Dev).app/Contents/MacOS/Electron --t3code-dev-root=$fork_dir/apps/desktop "* ]]; then
+      kill -TERM "$pid"
+    fi
+    rm -f "$run/desktop-app.pid"
+  fi
   response="$(broker status "$id" | json_only)"
   status="$(printf '%s\n' "$response" | jq -r '.status')"
   retention="$(printf '%s\n' "$response" | jq -r '.retention')"
