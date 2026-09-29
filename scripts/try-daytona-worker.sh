@@ -13,9 +13,10 @@ identity_agent="${T3_DAYTONA_IDENTITY_AGENT:-$HOME/Library/Group Containers/2BUA
 
 usage() {
   cat <<'EOF'
-Usage: scripts/try-daytona-worker.sh start|pair|status|stop
+Usage: scripts/try-daytona-worker.sh start|show|pair|status|stop
 
-start   Create a disposable Daytona worker, then open an isolated T3 desktop app.
+start   Create a disposable Daytona worker and launch an isolated T3 desktop app.
+show    Bring the running Daytona demo app to the front.
 pair    Print a fresh pairing link for the worker (expires after 30 minutes).
 status  Show the current broker task.
 stop    Archive the worker workspace, then dispose of the worker and stop the tunnel.
@@ -49,6 +50,103 @@ worker_ssh() {
   ssh -F "$(run_dir)/ssh.conf" -o BatchMode=yes daytona-t3-demo "$@"
 }
 
+start_macos_services() {
+  local run="$1" app_pid app_command
+  python3 - "$run" "$fork_dir" "$PATH" "$(command -v node)" <<'PY'
+import os
+import plistlib
+import sys
+
+run, fork, path, node = sys.argv[1:]
+home = os.path.join(run, "t3-home")
+bundle_suffix = "".join(character for character in os.path.basename(fork).lower() if character.isascii() and character.isalnum()) or "local"
+jobs = {
+    "tunnel": {
+        "Label": "com.minoo.t3-daytona-demo-tunnel",
+        "ProgramArguments": [
+            "/usr/bin/ssh", "-F", os.path.join(run, "ssh.conf"),
+            "-o", "BatchMode=yes", "-o", "ExitOnForwardFailure=yes",
+            "-N", "-L", "127.0.0.1:39774:127.0.0.1:39773",
+            "-L", "127.0.0.1:4173:127.0.0.1:4173", "daytona-t3-demo",
+        ],
+        "RunAtLoad": True,
+        "KeepAlive": True,
+        "StandardOutPath": os.path.join(run, "tunnel.log"),
+        "StandardErrorPath": os.path.join(run, "tunnel.log"),
+    },
+    "desktop": {
+        "Label": "com.minoo.t3-daytona-demo-desktop",
+        "ProgramArguments": [
+            node, os.path.join(fork, "apps/desktop/scripts/start-electron.mjs"),
+        ],
+        "WorkingDirectory": fork,
+        "EnvironmentVariables": {
+            "HOME": os.environ["HOME"],
+            "PATH": path,
+            "T3CODE_HOME": home,
+            "T3CODE_DESKTOP_APP_DATA_DIRECTORY": os.path.join(run, "desktop-app-data"),
+            "T3CODE_DESKTOP_DISPLAY_NAME": "T3 Code (Daytona Demo)",
+            "T3CODE_DESKTOP_APP_USER_MODEL_ID": f"com.t3tools.t3code.daytonademo.{bundle_suffix}",
+            "T3CODE_DESKTOP_DAYTONA_DEMO": "1",
+            "T3CODE_PORT": "33773",
+            "T3CODE_DISABLE_AUTO_UPDATE": "1",
+        },
+        "RunAtLoad": True,
+        "KeepAlive": True,
+        "StandardOutPath": os.path.join(run, "desktop.log"),
+        "StandardErrorPath": os.path.join(run, "desktop.log"),
+    },
+}
+for name, job in jobs.items():
+    with open(os.path.join(run, f"{name}.plist"), "wb") as file:
+        plistlib.dump(job, file)
+PY
+  launchctl bootstrap "gui/$(id -u)" "$run/tunnel.plist"
+  for _ in {1..30}; do
+    curl -fsS http://127.0.0.1:39774/.well-known/t3/environment >/dev/null 2>&1 && break
+    sleep 1
+  done
+  curl -fsS http://127.0.0.1:39774/.well-known/t3/environment >/dev/null || {
+    echo "Worker tunnel did not become ready. See $run/tunnel.log" >&2
+    exit 1
+  }
+  launchctl bootstrap "gui/$(id -u)" "$run/desktop.plist"
+  app_pid=""
+  for _ in {1..180}; do
+    while read -r pid app_command; do
+      if [[ "$app_command" == "$fork_dir/apps/desktop/.electron-runtime/T3 Code (Daytona Demo).app/Contents/MacOS/Electron dist-electron/main.cjs" ]]; then
+        app_pid="$pid"
+        break
+      fi
+    done < <(ps -axo pid=,command=)
+    if [[ -n "$app_pid" ]] && curl -fsS "http://127.0.0.1:$desktop_server_port/.well-known/t3/environment" >/dev/null 2>&1; then
+      printf '%s\n' "$app_pid" > "$run/desktop-app.pid"
+      pair
+      printf 'Desktop ready: T3 Code (Daytona Demo).\n'
+      printf 'To bring it forward later: %s show\n' "$fork_dir/scripts/try-daytona-worker.sh"
+      return
+    fi
+    sleep 1
+  done
+  echo "Desktop did not become ready. See $run/desktop.log" >&2
+  exit 1
+}
+
+show() {
+  local app_path app_command pid found=""
+  [[ "$(uname)" == Darwin ]] || { echo "show is available on macOS only." >&2; exit 1; }
+  app_path="$fork_dir/apps/desktop/.electron-runtime/T3 Code (Daytona Demo).app"
+  [[ -d "$app_path" ]] || { echo "Demo app not built. Run '$0 start' first." >&2; exit 1; }
+  while read -r pid app_command; do
+    if [[ "$app_command" == "$app_path/Contents/MacOS/Electron dist-electron/main.cjs" ]]; then
+      found="$pid"
+      break
+    fi
+  done < <(ps -axo pid=,command=)
+  [[ -n "$found" ]] || { echo "Demo app is not running. Run '$0 start' first." >&2; exit 1; }
+  open -a "$app_path"
+}
+
 pair() {
   local output link run
   run="$(run_dir)"
@@ -71,7 +169,7 @@ REMOTE
 
 start() {
   local id run response status worker tunnel_pid desktop_pid desktop_wrapper_pid command_line app_pid app_command
-  for command in bun jq ssh curl; do
+  for command in bun jq ssh curl node; do
     command -v "$command" >/dev/null || { echo "Missing $command" >&2; exit 1; }
   done
   [[ -n "$proxy_command" ]] || { echo "plana-box is not on PATH" >&2; exit 1; }
@@ -150,7 +248,16 @@ REMOTE
       exit 1
     fi
   done
-  ssh -F "$run/ssh.conf" -o BatchMode=yes -o ExitOnForwardFailure=yes \
+  if [[ "$(uname)" == Darwin ]]; then
+    printf 'Building isolated desktop (log: %s/build.log)...\n' "$run"
+    if ! (cd "$fork_dir" && ./node_modules/.bin/vp run build:desktop > "$run/build.log" 2>&1); then
+      tail -60 "$run/build.log" >&2
+      exit 1
+    fi
+    start_macos_services "$run"
+    return
+  fi
+  nohup ssh -F "$run/ssh.conf" -o BatchMode=yes -o ExitOnForwardFailure=yes \
     -N -L 127.0.0.1:39774:127.0.0.1:39773 \
     -L 127.0.0.1:4173:127.0.0.1:4173 daytona-t3-demo \
     > "$run/tunnel.log" 2>&1 < /dev/null &
@@ -176,15 +283,18 @@ REMOTE
   printf 'worker project named repo, then open Files, Diff, Terminal, or Browser.\n'
   printf 'Run npm start in the T3 terminal and select localhost:4173 in Browser.\n'
   printf 'If the dev window starts blank, wait for the build, then choose View > Force Reload.\n'
-  printf 'When done, press Ctrl-C here and run: %s stop\n\n' "$0"
+  printf 'When done, run: %s stop\n\n' "$0"
   cd "$fork_dir"
-  T3CODE_HOME="$run/t3-home" \
-  T3CODE_DESKTOP_APP_DATA_DIRECTORY="$run/desktop-app-data" \
-  T3CODE_DESKTOP_DISPLAY_NAME="T3 Code (Daytona Demo)" \
-  T3CODE_PORT_OFFSET=20000 \
-  T3CODE_DISABLE_AUTO_UPDATE=1 \
-    ./node_modules/.bin/vp run dev:desktop --home-dir "$run/t3-home" &
+  nohup env \
+    T3CODE_HOME="$run/t3-home" \
+    T3CODE_DESKTOP_APP_DATA_DIRECTORY="$run/desktop-app-data" \
+    T3CODE_DESKTOP_DISPLAY_NAME="T3 Code (Daytona Demo)" \
+    T3CODE_PORT_OFFSET=20000 \
+    T3CODE_DISABLE_AUTO_UPDATE=1 \
+    ./node_modules/.bin/vp run dev:desktop --home-dir "$run/t3-home" \
+    > "$run/desktop.log" 2>&1 < /dev/null &
   desktop_wrapper_pid=$!
+  printf '%s\n' "$desktop_wrapper_pid" > "$run/desktop-wrapper.pid"
   desktop_pid=""
   for _ in {1..20}; do
     desktop_pid="$(pgrep -P "$desktop_wrapper_pid" | head -1 || true)"
@@ -211,16 +321,38 @@ REMOTE
       printf '%s\n' "$app_pid" > "$run/desktop-app.pid"
       break
     fi
-    kill -0 "$desktop_wrapper_pid" 2>/dev/null || break
+    if ! kill -0 "$desktop_wrapper_pid" 2>/dev/null; then
+      echo "Desktop build exited before opening. See $run/desktop.log" >&2
+      exit 1
+    fi
     sleep 1
   done
-  wait "$desktop_wrapper_pid"
+  if [[ -z "$app_pid" ]]; then
+    echo "Desktop did not open within three minutes. See $run/desktop.log" >&2
+    exit 1
+  fi
+  for _ in {1..30}; do
+    if curl -fsS "http://127.0.0.1:$desktop_server_port/.well-known/t3/environment" >/dev/null 2>&1; then
+      printf 'Desktop ready: T3 Code (Daytona Demo).\n'
+      return
+    fi
+    sleep 1
+  done
+  echo "Desktop backend did not become ready. See $run/desktop.log" >&2
+  exit 1
 }
 
 stop() {
   local id run pid command_line response status retention
   id="$(task_id)"
   run="$(run_dir)"
+  if [[ "$(uname)" == Darwin ]]; then
+    for name in desktop tunnel; do
+      if [[ -f "$run/$name.plist" ]]; then
+        launchctl bootout "gui/$(id -u)" "$run/$name.plist" 2>/dev/null || true
+      fi
+    done
+  fi
   if [[ -s "$run/desktop.pid" ]]; then
     pid="$(cat "$run/desktop.pid")"
     command_line="$(ps -p "$pid" -o command= 2>/dev/null || true)"
@@ -229,10 +361,19 @@ stop() {
     fi
     rm -f "$run/desktop.pid"
   fi
+  if [[ -s "$run/desktop-wrapper.pid" ]]; then
+    pid="$(cat "$run/desktop-wrapper.pid")"
+    command_line="$(ps -p "$pid" -o command= 2>/dev/null || true)"
+    if [[ "$command_line" == *"vp run dev:desktop"* && "$command_line" == *"$run/t3-home"* ]]; then
+      kill -TERM "$pid"
+    fi
+    rm -f "$run/desktop-wrapper.pid"
+  fi
   if [[ -s "$run/desktop-app.pid" ]]; then
     pid="$(cat "$run/desktop-app.pid")"
     command_line="$(ps -p "$pid" -o command= 2>/dev/null || true)"
-    if [[ "$command_line" == "$fork_dir/apps/desktop/.electron-runtime/T3 Code (Dev).app/Contents/MacOS/Electron --t3code-dev-root=$fork_dir/apps/desktop "* ]]; then
+    if [[ "$command_line" == "$fork_dir/apps/desktop/.electron-runtime/T3 Code (Daytona Demo).app/Contents/MacOS/Electron dist-electron/main.cjs" ||
+          "$command_line" == "$fork_dir/apps/desktop/.electron-runtime/T3 Code (Dev).app/Contents/MacOS/Electron --t3code-dev-root=$fork_dir/apps/desktop "* ]]; then
       kill -TERM "$pid"
     fi
     rm -f "$run/desktop-app.pid"
@@ -270,6 +411,7 @@ stop() {
 
 case "${1:-help}" in
   start) start ;;
+  show) show ;;
   pair) pair ;;
   status) broker status "$(task_id)" | json_only ;;
   stop) stop ;;

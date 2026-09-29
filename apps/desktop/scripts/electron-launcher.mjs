@@ -9,17 +9,24 @@ import * as NodeURL from "node:url";
 import { ensureElectronRuntime } from "./ensure-electron-runtime.mjs";
 
 const isDevelopment = Boolean(process.env.VITE_DEV_SERVER_URL);
+const isDaytonaDemo = process.env.T3CODE_DESKTOP_DAYTONA_DEMO === "1";
 const __dirname = NodePath.dirname(NodeURL.fileURLToPath(import.meta.url));
 export const desktopDir = NodePath.resolve(__dirname, "..");
 const repoRoot = NodePath.resolve(desktopDir, "..", "..");
 const devBundleIdSuffix = NodePath.basename(repoRoot)
   .toLowerCase()
   .replaceAll(/[^a-z0-9]+/g, "");
-const APP_DISPLAY_NAME = isDevelopment ? "T3 Code (Dev)" : "T3 Code (Alpha)";
-const APP_BUNDLE_ID = isDevelopment
-  ? `com.t3tools.t3code.dev.${devBundleIdSuffix || "local"}`
-  : "com.t3tools.t3code";
-const APP_PROTOCOL_SCHEMES = isDevelopment ? ["t3code-dev"] : ["t3code"];
+const APP_DISPLAY_NAME = isDaytonaDemo
+  ? "T3 Code (Daytona Demo)"
+  : isDevelopment
+    ? "T3 Code (Dev)"
+    : "T3 Code (Alpha)";
+const APP_BUNDLE_ID = isDaytonaDemo
+  ? `com.t3tools.t3code.daytonademo.${devBundleIdSuffix || "local"}`
+  : isDevelopment
+    ? `com.t3tools.t3code.dev.${devBundleIdSuffix || "local"}`
+    : "com.t3tools.t3code";
+const APP_PROTOCOL_SCHEMES = isDaytonaDemo ? [] : isDevelopment ? ["t3code-dev"] : ["t3code"];
 const LAUNCHER_VERSION = 19;
 const developmentMacIconPngPath = NodePath.join(
   repoRoot,
